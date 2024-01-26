@@ -21,12 +21,6 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 # Add these variables at the beginning of your script
 output_file_path = "C:/Users/Lenovo/Desktop/headount/file/output/error_log.csv"
-csv_headers = ["Orgpath", "part", "success/failure", "retry_count", "error_code", "error_message"]
-# Add this function to write the information to a CSV file
-def write_to_csv(orgpath, part, status, retries, error_code, error_message):
-    with open(output_file_path, mode='a', newline='') as csv_file:
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerow([orgpath, part, status, retries, error_code, error_message])
 json_directory="C:/Users/Lenovo/Desktop/headount/file/output"
 log_file_path = os.path.join(json_directory, log_filename)
 bucket_name="head-count"
@@ -46,7 +40,6 @@ def extract_parts_from_json(json_data):
     qualifier = org_job_data.get("qualifier", "")
     # Split the qualifier string by "/"
     parts = qualifier.split("/")
-   # print(parts)
 
     # # Look for parts that match the pattern '000X-Stratford' and extract the digits
     store_code_match = re.search(r'(\d+)-(.+)', '/'.join(parts))
@@ -110,20 +103,18 @@ def validate_json(json_input):
         except json.JSONDecodeError:
             return False
     elif isinstance(json_input, dict):
-        # No need to convert, just validate the dictionary
         pass
     else:
-        # If not a string or dictionary, it's invalid
         return False
-
     return True
 
 def post_chunk_to_Wfd(chunk_json_data, store_code, access_token=None):
     retries = 0
+    error_msg=set()
     max_retries = 1
     chunk_json_string = None
-    response_content = None  # Added variable to store response content
-    response = None  # Initialize the variable outside the try block
+    response_content = None 
+    response = None 
     chunk_json_data = json.loads(chunk_json_data)
     data = extract_parts_from_json(chunk_json_data)
     market = data['market']
@@ -141,8 +132,6 @@ def post_chunk_to_Wfd(chunk_json_data, store_code, access_token=None):
             }
             response = requests.post(api, headers=headers, json=chunk_json_data)
             response_content=response.text
-
-            # print(f"API Response Content: {response_content}")  # Add this line
             if response.status_code == 200:
                 logger.info("Labor Forecast created successfully")
                 break
@@ -163,30 +152,32 @@ def post_chunk_to_Wfd(chunk_json_data, store_code, access_token=None):
 
     if retries == max_retries:
         unique_error_message = []
-        unique_error_data_list = []
-        unique_error_code_list = []
+        # unique_error_data_list = []
+        # unique_error_code_list = []
+        # notification_msg=set()
         response_content = json.loads(response_content)    
         for result in response_content.get("details", {}).get("results", []):
             error = result.get("error", {})
             error_code = error.get("errorCode", "Unknown")
             error_message = error.get("message", "Unknown Error")
-            unique_error_message.append(error_message)
-            error_data_list = error.get("details", {}).get("input", {}).get("orgJob", {}).get("qualifier", None)
-            if error_data_list not in unique_error_data_list:
-                unique_error_data_list.append(error_data_list)
-            if error_code not in unique_error_code_list:
-                unique_error_code_list.append(error_code)
-        error_msg = f"Error in Wfd response for store {store_code}. Error Code: {error_code}, Error Message: {error_message}"
-        print(error_msg)
-        print(f"Max retries exceeded: Writing JSON response to S3 for store {store_code}_{suffix}")
+            unique_error_message.append(f"Error in Wfd response for store {store_code}. Error Code: {error_code}, Error Message: {error_message}")
+        #     error_data_list = error.get("details", {}).get("input", {}).get("orgJob", {}).get("qualifier", None)
+        #     if error_data_list not in unique_error_data_list:
+        #         unique_error_data_list.append(error_data_list)
+        #     if error_code not in unique_error_code_list:
+        #         unique_error_code_list.append(error_code)
+        #     notification_msg.append(f"Error in Wfd response for store {store_code}. Error Code: {error_code}, Error Message: {error_message}")
+        # error_msg.update(notification_msg)
+        #print(f"Max retries exceeded: Writing JSON response to S3 for store {store_code}_{suffix}")
         filename = f"output/{start_date}-to-{end_date}_{store_code}_{market}_{suffix}.json"
-        response_content_str = json.dumps(response_content, indent=2)  # Convert dict to string
-        status_code = upload_to_s3(response_content_str, bucket_name, filename)  # Upload string instead of dict
-        print(f"S3 Upload Status Code: {status_code}")  # Add this line
+        response_content_str = json.dumps(response_content, indent=2)
+        status_code = upload_to_s3(response_content_str, bucket_name, filename)
+        print(f"S3 Upload Status Code: {status_code}")
         if status_code == 200:
             print("File uploaded successfully")
         else:
             print("File upload failed")
+    return unique_error_message
             
 def process_json_string_list(json_data_list):
     grouped_data = defaultdict(list)
@@ -208,10 +199,8 @@ def handle_retry_exception(exception, retries,chunk_json_string):
         logger.error(f"The JSON API Body is: {chunk_json_string}")
         time.sleep(wait)
 
-
 def json_validation_deletion_input(json_string, send_only_one_chunk=True, access_token=None):
-    success_paths = []  # List to track successfully created paths
-    failure_paths = []  # List to track paths that failed to be created
+    error_messages = []
     json_validation = validate_json(json_string)
     json_data = json.loads(json_string)
     qualifier = json_data["orgJob"]["qualifier"]
@@ -239,7 +228,8 @@ def json_validation_deletion_input(json_string, send_only_one_chunk=True, access
                     ]
                 }
                 chunk_json_string = json.dumps(chunk_json_data, indent=2)
-                post_chunk_to_Wfd(chunk_json_string, store_code, access_token)
+                error_msg=post_chunk_to_Wfd(chunk_json_string, store_code, access_token)
+                error_messages.append(error_msg)
             else:
                 for chunk_index, chunk in enumerate(headcounts_per_day_chunks):
                     chunk_json_data = {
@@ -253,22 +243,18 @@ def json_validation_deletion_input(json_string, send_only_one_chunk=True, access
                         ]
                     }
                     chunk_json_string = json.dumps(chunk_json_data, indent=2)
-                    status = post_chunk_to_Wfd(chunk_json_string, store_code, access_token)
-                    if status:
-                        success_paths.append(qualifier)
-                        print(f"Part {chunk_index + 1} successfully posted for {qualifier}")
-                    else:
-                        failure_paths.append(qualifier)
-                        print(f"Part {chunk_index + 1} failed to post for {qualifier}")
+                    error_msg = post_chunk_to_Wfd(chunk_json_string, store_code, access_token)
+                    error_messages.append(error_msg)
         except Exception as e:
             print("Error during chunking or processing: %s" % e)
     else:
         print("JSON Validation Error: %s" % json_string)
+    return error_messages
 
 def process_head_counts(csv_content):
     head_counts = {}
     csv_reader = csv.reader(csv_content.splitlines())
-    next(csv_reader)  # Skip header row
+    next(csv_reader)
     for row in csv_reader:
         store = row[0]
         department = row[1]
@@ -291,7 +277,7 @@ def generate_json_structure(store_data, time_slot_hours):
     }
     store_data['Date'] = pd.to_datetime(store_data['Date'])
     for index, row in store_data.iterrows():
-        if pd.notna(row['Date']):  # Check for NaT before formatting
+        if pd.notna(row['Date']):
             query_key = (row['STORE'], row['Department'], row['Job'], row['Date'].date())
             head_count_str = ",".join(map(str, time_slot_hours[query_key]["hours"]))
             json_structure = {
@@ -325,7 +311,7 @@ def download_from_s3(s3_bucket, s3_key):
         return content
     except Exception as e:
         logger.error(f"Error downloading from S3: {e}")
-        raise  # Re-raise the exception
+        raise
 
 def upload_to_s3(content, s3_bucket, s3_key):
     """
@@ -333,35 +319,35 @@ def upload_to_s3(content, s3_bucket, s3_key):
     """
     try:
         s3.put_object(Body=content, Bucket=s3_bucket, Key=s3_key)
-        return 200  # 200 OK for successful upload
+        return 200
     except Exception as e:
         logger.error(f"Error uploading to S3: {e}")
-        return 500  # 500 Internal Server Error for upload failure
+        return 500
 
 if __name__ == "__main__":
     try:
-
         print("Start of create store hours Lambda execution")
-
         access_token=authenticate_Wfd()
         json_data_list = []
         lookup_content = download_from_s3(bucket_name, lookup_s3_key)
         df_store_lookup_data = pd.read_csv(StringIO(lookup_content))
         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=input_folder)
+        error_messages=[]
         for s3_object in response.get('Contents', []):
             s3_key = s3_object['Key']
             file_content = download_from_s3(bucket_name, s3_key)
             if not file_content.strip():
                 logger.error(f"Empty file: {s3_key}")
-                continue  # Skip to the next iteration
+                continue
             try:
                 df_input_data = pd.read_csv(StringIO(file_content))
             except pd.errors.EmptyDataError:
                 print(f"Empty data error: Could not parse CSV content for file {s3_key}")
-                continue  # Skip to the next iteration
+                continue 
             df_store_data = pd.merge(df_store_lookup_data, df_input_data, how='left', left_on='STORE', right_on='Store')
             time_slot_hours = process_head_counts(file_content)
             json_data_list.append(generate_json_structure(df_store_data, time_slot_hours))
+            s3.delete_object(Bucket=bucket_name, Key=s3_key)
         grouped_data = process_json_string_list(json_data_list)
         min_date = None
         max_date = None
@@ -400,19 +386,19 @@ if __name__ == "__main__":
             }
             try:
                 json_content = create_json_file(json_data)
-                # Save the JSON content to a file with org job as the filename
-                json_validation_deletion_input(json_content, send_only_one_chunk=False,access_token=access_token)
-                s3.delete_object(Bucket=bucket_name, Key=s3_key)
-                print(f"Deleted CSV file: {s3_key}")
+                error=json_validation_deletion_input(json_content, send_only_one_chunk=False,access_token=access_token)
+                error_messages.append(error)
             except Exception as e:
                 logger.error(f"Error uploading file to S3: {e}")
-        #json_validation_deletion_input(json_content, send_only_one_chunk=False,access_token=access_token,delete_csv_after_validation=False) # can be used for testing last files first 28 data will be counted
+        erroe_message_list = [item for sublist in error_messages for subsublist in sublist for item in subsublist]
+        unique_messages_set = set(erroe_message_list)
+        unique_messages_list = list(unique_messages_set)
+        print(unique_messages_list)
+
+        print("End of create store hours Lambda execution")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
          # Add a print statement
         print(f"An error occurred: {e}")
     finally:
         print("End of create store hours Lambda execution")
-
-# Add a print statement
-print(f"Debug log file created at: {log_filename}")
