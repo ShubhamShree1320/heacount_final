@@ -1,10 +1,7 @@
-import json
-import os
-import time
+import json,time
 from collections import defaultdict
-from datetime import timedelta, datetime,date
-import csv
-import re
+from datetime import timedelta, datetime, date
+import csv, re
 import pandas as pd
 import logging
 import boto3
@@ -13,34 +10,29 @@ from botocore.config import Config
 import requests
 # Set up logging to a file
 log_filename = "debug_log.txt"
-log_filename1="info.txt"
 logging.basicConfig(filename=log_filename, level=logging.DEBUG)
-logging.basicConfig(filename=log_filename1, level=logging.INFO)
-# Initialize the logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-# Add these variables at the beginning of your script
 output_file_path = "C:/Users/Lenovo/Desktop/headount/file/output/error_log.csv"
-json_directory="C:/Users/Lenovo/Desktop/headount/file/output"
-log_file_path = os.path.join(json_directory, log_filename)
 bucket_name="head-count"
-json_directory="C:/Users/Lenovo/Desktop/headount/file/output"
 input_folder = "input"
 lookup_s3_key = "lookup/Store_Lookup_Table_UKGPro.csv"
 hostname= "https://sainsburysretail-dev.npr.mykronos.com"
 url="/api/v1/forecasting/labor_forecast/multi_create/"
 # Set Retries for Boto3
 config = Config(retries={'max_attempts': 10, 'mode': 'standard'})
-
 # Create S3 Connection
 s3 = boto3.client('s3', config=config)
-
 def extract_parts_from_json(json_data):
+    '''
+        Extract relevant parts from JSON data to obtain store code, market, suffix, start date, and end date.
+        :param json_data: JSON data containing organizational job and headcounts per day
+        :return: Dictionary containing extracted information
+    '''
     org_job_data = json_data.get("orgJobs", [{}])[0].get("orgJob", {})
     qualifier = org_job_data.get("qualifier", "")
     # Split the qualifier string by "/"
     parts = qualifier.split("/")
-
     # # Look for parts that match the pattern '000X-Stratford' and extract the digits
     store_code_match = re.search(r'(\d+)-(.+)', '/'.join(parts))
     dates=json_data.get("orgJobs", [{}])[0].get("headcountsPerDay", {})
@@ -58,14 +50,13 @@ def extract_parts_from_json(json_data):
         }
         return result
     else:
-        print("Store Code not found in the qualifier.")
-        print("Debug Info:")
-        print("Qualifier:", qualifier)
-        print("Parts:", parts)
         return None
-
-
-def authenticate_Wfd():
+    
+def authenticate_Wfd():    
+    '''
+        Authenticate with Wfd API to obtain access token.
+        :return: Access token for authentication
+    '''
     url = "https://sainsburysretail-dev.npr.mykronos.com/api/authentication/access_token"
     headers = {
         "appkey": "AZbcoqIUAwE5ahMAPRyLDSwpul4OGeug",
@@ -93,7 +84,6 @@ def authenticate_Wfd():
 def validate_json(json_input):
     '''
     Validate JSON string or dictionary.
-
     :param json_input: JSON in string or dictionary format
     :return: True if valid, False otherwise
     '''
@@ -109,6 +99,13 @@ def validate_json(json_input):
     return True
 
 def post_chunk_to_Wfd(chunk_json_data, store_code, access_token=None):
+    '''
+        Post JSON chunk data to Workforce Distribution. Retry in case of failure.
+        :param chunk_json_data: JSON data chunk to post
+        :param store_code: Code of the store
+        :param access_token: Token for authentication (optional)
+        :return: List of unique error messages encountered during posting
+    '''
     retries = 0
     error_msg=set()
     max_retries = 1
@@ -180,6 +177,12 @@ def post_chunk_to_Wfd(chunk_json_data, store_code, access_token=None):
     return unique_error_message
             
 def process_json_string_list(json_data_list):
+    
+    '''
+        Process a list of JSON strings containing organizational job data. Group the data by organizational job qualifier.
+        :param json_data_list: List of JSON strings containing organizational job data
+        :return: Dictionary where keys are organizational job qualifiers and values are lists of headcounts per day
+    '''
     grouped_data = defaultdict(list)
     for json_data in json_data_list:
         for org_job_entry in json_data.get('orgJobs', []):
@@ -192,6 +195,13 @@ def round_time_to_15_minutes(time):
     return (datetime.combine(datetime.today(), time) + timedelta(minutes=15)).time()
   
 def handle_retry_exception(exception, retries,chunk_json_string):
+    
+    '''
+        Handle retry attempts for Wfd API requests. Log the error message and retry information.
+        :param exception: The exception raised during the API request
+        :param retries: Number of retry attempts made
+        :param chunk_json_string: JSON string used in the API request
+    '''
     logger.error(f"Error during Wfd API request: {exception}")
     if retries < 1:
         wait = retries * 40
@@ -200,6 +210,14 @@ def handle_retry_exception(exception, retries,chunk_json_string):
         time.sleep(wait)
 
 def json_validation_deletion_input(json_string, send_only_one_chunk=True, access_token=None):
+    
+    '''
+        Validate and process JSON input for deletion. Split the data into chunks if required and send to Wfd API for deletion.
+        :param json_string: JSON string containing data for deletion
+        :param send_only_one_chunk: Flag indicating whether to send only one chunk at a time (default: True)
+        :param access_token: Token for authentication (optional)
+        :return: List of error messages encountered during the deletion process
+    '''
     error_messages = []
     json_validation = validate_json(json_string)
     json_data = json.loads(json_string)
@@ -252,6 +270,11 @@ def json_validation_deletion_input(json_string, send_only_one_chunk=True, access
     return error_messages
 
 def process_head_counts(csv_content):
+    '''
+        Process headcounts from CSV content. Aggregate headcounts per store, department, job, and date.
+        :param csv_content: Content of the CSV file
+        :return: Dictionary containing aggregated headcounts per store, department, job, and date
+    '''
     head_counts = {}
     csv_reader = csv.reader(csv_content.splitlines())
     next(csv_reader)
@@ -272,6 +295,12 @@ def process_head_counts(csv_content):
     return head_counts
 
 def generate_json_structure(store_data, time_slot_hours):
+    '''
+        Generate JSON structure from store data and time slot hours.
+        :param store_data: DataFrame containing store data
+        :param time_slot_hours: Dictionary containing aggregated headcounts per time slot
+        :return: JSON structure for API request
+    '''
     json_data = {
         "orgJobs": []
     }
@@ -390,15 +419,11 @@ if __name__ == "__main__":
                 error_messages.append(error)
             except Exception as e:
                 logger.error(f"Error uploading file to S3: {e}")
-        erroe_message_list = [item for sublist in error_messages for subsublist in sublist for item in subsublist]
-        unique_messages_set = set(erroe_message_list)
+        error_message_list = [item for sublist in error_messages for subsublist in sublist for item in subsublist]
+        unique_messages_set = set(error_message_list)
         unique_messages_list = list(unique_messages_set)
         print(unique_messages_list)
-
-        print("End of create store hours Lambda execution")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-         # Add a print statement
-        print(f"An error occurred: {e}")
     finally:
         print("End of create store hours Lambda execution")
