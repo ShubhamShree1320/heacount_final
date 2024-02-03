@@ -19,11 +19,21 @@ hostname = os.environ["hostname"]
 url=os.environ["url"]
 bucket_name=os.environ["input_bucket"]
 input_folder=os.environ["input_folder"]
+resend_folder=os.environ["resend_folder"]
 
 def post_json_to_Wfd_Api(secret_id,file_key,hostname,url):
+    '''
+        Posts JSON data to the specified API endpoint after retrieving necessary credentials and retrying in case of failure.
+        :param secret_id: The ID of the secret containing API credentials.
+        :param file_key: The key of the file containing JSON data to be posted.
+        :param hostname: The hostname of the API endpoint.
+        :param url: The URL path of the API endpoint.
+        :return: None
+    '''
+
     try:
         retries = 0
-        max_retries = 4
+        max_retries = 1
         json_string=None
         response = s3.get_object(Bucket=bucket_name, Key=file_key)
         content = response['Body'].read().decode('utf-8')
@@ -50,19 +60,20 @@ def post_json_to_Wfd_Api(secret_id,file_key,hostname,url):
                 handle_retry_exception(retries)
                 retries += 1
         if retries == max_retries:
-            s3_resource.Object(bucket_name, file_key).delete()
-            # print("save file to resend folder")            
+            resend_file_key = file_key.split("/")[-1].replace(".json", "")
+            filename = f"{resend_folder}/{resend_file_key}_resend.json"
+            s3.put_object(Body=json.dumps(json_data,indent=2), Bucket=bucket_name, Key=filename)
+            s3_resource.Object(bucket_name, file_key).delete()           
     except Exception as e:
         logger.exception("Exception during program execution.")
 
 def handle_retry_exception(retries):  
     '''
         Handle retry attempts for Wfd API requests. Log the error message and retry information.
-        :param exception: The exception raised during the API request
         :param retries: Number of retry attempts made
     '''
     logger.error(f"Error during Wfd API request")
-    if retries < 4:
+    if retries < 1:
         wait = retries * 40
         logger.error(f"Error! Retry {retries + 1}: Waiting {wait} secs and re-trying...")
         time.sleep(wait)
@@ -76,12 +87,11 @@ def handler(event, context):
                 file_key = obj['Key']
                 remaining_time = context.get_remaining_time_in_millis()
                 remaining_time_seconds = remaining_time // 1000 # converts it into seconds
-                minutes, seconds = divmod(remaining_time_seconds, 60) # get min and seconds usin div mod
+                minutes, seconds = divmod(remaining_time_seconds, 60) # get min and seconds usin divmod
                 remaining_time = f"{minutes:02}:{seconds:02}"
-                if remaining_time < '02:00':  # Assuming 60 seconds threshold, adjust as needed
+                if remaining_time < '02:00':
                     raise Exception("Insufficient time remaining, stopping further processing.")
                 post_json_to_Wfd_Api(secret_id, file_key, hostname, url)
-                logger.info(f"{file_key} processed successfully")
     except Exception as e:
         print("Error occurred:", str(e))
     finally:
